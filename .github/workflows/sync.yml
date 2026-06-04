@@ -18,4 +18,6 @@ jobs:
       - name: Push to hub
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: git push -f https://Abokhadra1331:$HF_TOKEN@huggingface.co/spaces/Abokhadra1331/SHIB main
+        run: |
+          git remote add space https://Abokhadra1331:$HF_TOKEN@huggingface.co/spaces/Abokhadra1331/SHIB
+          git push --force space main
