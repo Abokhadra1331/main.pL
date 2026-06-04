@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-# --- إعدادات السيرفر للحفاظ على بقاء البوت 24/7 ---
+# --- إعدادات السيرفر ---
 flask_app = Flask(__name__)
 @flask_app.route('/')
 def home():
@@ -20,7 +20,7 @@ def home():
 def run_flask():
     flask_app.run(host="0.0.0.0", port=7860)
 
-# --- الإعدادات الأساسية ---
+# --- الإعدادات ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 868999453
 PAYMENT_CHANNEL = "@Crypto_Fox13"
@@ -29,7 +29,7 @@ REWARD_PER_REFERRAL = 2000
 MIN_WITHDRAW = 10000
 CURRENCY = "SHIB"
 
-# --- إدارة قاعدة البيانات ---
+# --- قاعدة البيانات ---
 def init_db():
     conn = sqlite3.connect("bot.db")
     c = conn.cursor()
@@ -38,74 +38,93 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_user(user_id):
-    conn = sqlite3.connect("bot.db"); c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,)); row = c.fetchone(); conn.close(); return row
+# --- وظائف مساعدة ---
+def check_sub(user_id, context):
+    for channel in CHANNELS:
+        try:
+            member = context.bot.get_chat_member(chat_id=channel, user_id=user_id)
+            if member.status in ['left', 'kicked']: return False
+        except: return False
+    return True
 
-def add_user(user_id, username, referred_by=None):
+def add_user(user_id, username, referred_by):
     conn = sqlite3.connect("bot.db"); c = conn.cursor()
     c.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
     if not c.fetchone():
         c.execute("INSERT INTO users (user_id, username, referred_by, joined_at) VALUES (?,?,?,?)", (user_id, username, referred_by, datetime.now().isoformat()))
+        if referred_by:
+            c.execute("UPDATE users SET balance=balance+?, referrals=referrals+1 WHERE user_id=?", (REWARD_PER_REFERRAL, referred_by))
         conn.commit()
     conn.close()
 
-def get_balance(user_id):
-    conn = sqlite3.connect("bot.db"); c = conn.cursor()
-    c.execute("SELECT balance, referrals FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone(); conn.close(); return row if row else (0, 0)
-
-# --- الدوال الخاصة بالبوت ---
+# --- الأوامر ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
     referred_by = int(args[0]) if args and args[0].isdigit() else None
     add_user(user.id, user.username or user.first_name, referred_by)
     
-    keyboard = ReplyKeyboardMarkup([["💰 رصيدي", "🔗 رابط الإحالة"], ["💵 سحب"], ["📢 قناة إثبات الدفع"]], resize_keyboard=True)
-    await update.message.reply_text(f"👋 أهلاً بك {user.first_name} في بوت {CURRENCY}!\n💰 اربح المال من الإحالات.", reply_markup=keyboard)
+    if not check_sub(user.id, context):
+        buttons = [[InlineKeyboardButton(f"اشترك في {ch}", url=f"https://t.me/{ch.lstrip('@')}")] for ch in CHANNELS]
+        buttons.append([InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check")])
+        await update.message.reply_text("⚠️ يجب الاشتراك في القنوات أولاً:", reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await send_main_menu(update)
+
+async def send_main_menu(update):
+    kb = ReplyKeyboardMarkup([["💰 رصيدي", "🔗 رابط الإحالة"], ["💵 سحب", "📊 إحصائياتي"], ["📢 قناة إثبات الدفع"]], resize_keyboard=True)
+    await update.message.reply_text("مرحباً بك في بوت الإحالات!", reply_markup=kb)
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.data == "check":
+        if check_sub(query.from_user.id, context):
+            await query.edit_message_text("✅ تم التحقق!")
+            await send_main_menu(update)
+        else:
+            await query.answer("❌ لم تشترك بعد!", show_alert=True)
+    elif query.data.startswith("approve_"):
+        if query.from_user.id == ADMIN_ID:
+            w_id = query.data.split("_")[1]
+            conn = sqlite3.connect("bot.db"); c = conn.cursor()
+            c.execute("UPDATE withdrawals SET status='approved' WHERE id=?", (w_id,))
+            conn.commit(); conn.close()
+            await query.edit_message_text("✅ تم الموافقة على السحب!")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
-    
     if text == "💰 رصيدي":
-        bal, refs = get_balance(user_id)
-        await update.message.reply_text(f"💰 رصيدك الحالي: {bal:,} {CURRENCY}\n👥 عدد إحالاتك: {refs}")
-    
+        conn = sqlite3.connect("bot.db"); c = conn.cursor()
+        c.execute("SELECT balance, referrals FROM users WHERE user_id=?", (user_id,))
+        bal, refs = c.fetchone()
+        await update.message.reply_text(f"💰 رصيدك: {bal} {CURRENCY}\n👥 الإحالات: {refs}")
     elif text == "🔗 رابط الإحالة":
         bot = await context.bot.get_me()
-        await update.message.reply_text(f"🔗 رابط إحالتك هو:\nhttps://t.me/{bot.username}?start={user_id}")
-    
+        await update.message.reply_text(f"🔗 رابطك: https://t.me/{bot.username}?start={user_id}")
     elif text == "💵 سحب":
-        bal, _ = get_balance(user_id)
-        if bal < MIN_WITHDRAW:
-            await update.message.reply_text(f"❌ رصيدك غير كافٍ. الحد الأدنى للسحب هو {MIN_WITHDRAW:,} {CURRENCY}")
+        conn = sqlite3.connect("bot.db"); c = conn.cursor()
+        c.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
+        bal = c.fetchone()[0]
+        if bal >= MIN_WITHDRAW:
+            c.execute("INSERT INTO withdrawals (user_id, amount, requested_at) VALUES (?,?,?)", (user_id, bal, datetime.now().isoformat()))
+            c.execute("UPDATE users SET balance=0 WHERE user_id=?", (user_id,))
+            conn.commit()
+            await update.message.reply_text("✅ تم إرسال طلبك للمراجعة!")
+            await context.bot.send_message(ADMIN_ID, f"طلب سحب جديد من {user_id}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ موافقة", callback_data=f"approve_{c.lastrowid}")]]))
         else:
-            await update.message.reply_text("📩 أرسل عنوان محفظتك (Binance ID) ليتم مراجعة الطلب:")
+            await update.message.reply_text("❌ رصيدك غير كافٍ.")
+        conn.close()
 
-# --- التشغيل الأساسي ---
 def main():
     init_db()
-    if not BOT_TOKEN:
-        print("❌ Error: BOT_TOKEN is missing!")
-        return
-    
-    # تشغيل السيرفر في الخلفية
     threading.Thread(target=run_flask, daemon=True).start()
-    
-    # إعدادات متقدمة تمنع Timeout وتضمن ثبات الاتصال
     request_config = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0, write_timeout=60.0)
-    
-    # بناء البوت
     app = Application.builder().token(BOT_TOKEN).request(request_config).build()
-    
-    # إضافة الأوامر
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    
-    print("🟢 البوت يعمل الآن وبانتظار الرسائل...")
-    # التشغيل مع إزالة أي تحديثات قديمة معلقة لتجنب الـ Conflict
+    print("🟢 البوت يعمل الآن بكامل طاقته!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
