@@ -9,6 +9,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
 )
+from telegram.request import HTTPXRequest
 
 # تشغيل سيرفر ويب خفيف لإرضاء منصة Hugging Face ومنع إغلاق الـ Space
 flask_app = Flask(__name__)
@@ -20,7 +21,7 @@ def home():
 def run_flask():
     flask_app.run(host="0.0.0.0", port=7860)
 
-# المتغيرات الأساسية الخاصة بك
+# المتغيرات الأساسية الخاص بك
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 868999453
 PAYMENT_CHANNEL = "@Crypto_Fox13"
@@ -344,20 +345,31 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def start_bot_async():
-    """تهيئة وتشغيل البوت بأسلوب غير متزامن متوافق تماماً مع البيئة بدون أي تصادم loops"""
-    app = Application.builder().token(BOT_TOKEN).build()
+    """تشغيل البوت بخصائص شبكة مخصصة تمنع الـ Timeout كلياً وتجبره على تكرار المحاولة"""
+    # رفع الـ Timeout الافتراضي لـ 60 ثانية بدلاً من 20 ليتناسب مع خوادم Hugging Face البطئية
+    custom_request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0)
+    
+    app = Application.builder().token(BOT_TOKEN).request(custom_request).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    # بناء البوت وبدء الاستماع مباشرة عبر تهيئة مخصصة للبيئات المشتركة
-    await app.initialize()
-    await app.updater.start_polling()
-    await app.start()
-    
-    # الحفاظ على تشغيل البوت مفتوحاً
+    # حلقة تكرار ذكية لمنع انهيار السيرفر إذا فشلت المحاولة الأولى
+    while True:
+        try:
+            print("⏳ محاولة تهيئة اتصال آمن مع تليجرام...")
+            await app.initialize()
+            await app.updater.start_polling()
+            await app.start()
+            print("🟢 تم الاتصال بنجاح! البوت يعمل الآن بكفاءة وبدون عوائق.")
+            break
+        except Exception as e:
+            print(f"⚠️ فشلت المحاولة بسبب بطء الاستجابة: {e}. إعادة المحاولة بعد 5 ثوانٍ...")
+            await asyncio.sleep(5)
+            
+    # الإبقاء على البوت حياً
     while True:
         await asyncio.sleep(3600)
 
@@ -368,11 +380,10 @@ def main():
         print("❌ خطأ: لم يتم العثور على BOT_TOKEN")
         return
 
-    # 1. تشغيل سيرفر الويب Flask في الخلفية فوراً لمنع الـ Runtime error
+    # 1. تشغيل سيرفر الويب Flask فوراً لإعطاء إشارة البناء الخضراء
     threading.Thread(target=run_flask, daemon=True).start()
     
-    # 2. تشغيل الـ Async loop الخاص بالبوت بشكل مستقل ومستقر
-    print("🚀 جاري إقلاع نظام البوت المطور بدون تضارب...")
+    # 2. تشغيل البوت المعزول المقاوم للـ Timeout
     asyncio.run(start_bot_async())
 
 if __name__ == "__main__":
