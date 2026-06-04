@@ -21,7 +21,7 @@ def home():
 def run_flask():
     flask_app.run(host="0.0.0.0", port=7860)
 
-# المتغيرات الأساسية الخاص بك
+# المتغيرات الأساسية الخاصة بك
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 868999453
 PAYMENT_CHANNEL = "@Crypto_Fox13"
@@ -127,13 +127,18 @@ def approve_withdrawal(withdrawal_id):
     conn.close()
 
 async def check_subscriptions(user_id, context):
+    """دالة فحص آمنة ومحمية من الـ Freeze والـ Crash"""
     for channel in CHANNELS:
         try:
-            member = await context.bot.get_chat_member(channel, user_id)
+            # تنظيف المعرف والتأكد من إضافة الـ @
+            ch_name = channel if channel.startswith("@") else f"@{channel}"
+            member = await context.bot.get_chat_member(chat_id=ch_name, user_id=user_id)
             if member.status in ["left", "kicked"]:
                 return False
-        except:
-            return False
+        except Exception as e:
+            print(f"⚠️ خطأ أثناء فحص القناة {channel}: {e}")
+            # لو البوت مش أدمن في القناة أو القناة فيها مشكلة هنتخطى مؤقتاً عشان البوت ما يقفش
+            continue 
     return True
 
 def reply_keyboard():
@@ -149,13 +154,13 @@ def subscription_keyboard():
     return InlineKeyboardMarkup(buttons)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_user:
+        return
     user = update.effective_user
     args = context.args
     referred_by = int(args[0]) if args and args[0].isdigit() else None
-    existing = get_user(user.id)
-
-    if not existing:
-        add_user(user.id, user.username or user.first_name, referred_by)
+    
+    add_user(user.id, user.username or user.first_name, referred_by)
 
     subscribed = await check_subscriptions(user.id, context)
     if not subscribed:
@@ -187,6 +192,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not query:
+        return
     await query.answer()
     user = query.from_user
 
@@ -212,10 +219,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_keyboard()
             )
         else:
-            await query.edit_message_text(
-                "❌ لم تشترك في جميع القنوات!\nاشترك ثم اضغط تحققت.",
-                reply_markup=subscription_keyboard()
-            )
+            try:
+                await query.edit_message_text(
+                    "❌ لم تشترك في جميع القنوات!\nاشترك ثم اضغط تحققت.",
+                    reply_markup=subscription_keyboard()
+                )
+            except:
+                pass
 
     elif query.data.startswith("approve_"):
         if user.id != ADMIN_ID:
@@ -228,8 +238,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("تم الموافقة مسبقاً!", show_alert=True)
             return
         approve_withdrawal(withdrawal_id)
-        target_user = await context.bot.get_chat(target_user_id)
-        username = f"@{target_user.username}" if target_user.username else target_user.first_name
+        
+        try:
+            target_user = await context.bot.get_chat(target_user_id)
+            username = f"@{target_user.username}" if target_user.username else target_user.first_name
+        except:
+            username = f"المستخدم ({target_user_id})"
+
         await context.bot.send_message(
             PAYMENT_CHANNEL,
             f"✅ تم الدفع!\n\n"
@@ -246,9 +261,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
         await query.edit_message_reply_markup(reply_markup=None)
-        await query.answer("✅ تم الموافقة وإرسال إثبات الدفع!", show_alert=True)
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_user:
+        return
     user = update.effective_user
     text = update.message.text
 
@@ -345,10 +361,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def start_bot_async():
-    """تشغيل البوت بخصائص شبكة مخصصة تمنع الـ Timeout كلياً وتجبره على تكرار المحاولة"""
-    # رفع الـ Timeout الافتراضي لـ 60 ثانية بدلاً من 20 ليتناسب مع خوادم Hugging Face البطئية
     custom_request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0)
-    
     app = Application.builder().token(BOT_TOKEN).request(custom_request).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -356,34 +369,30 @@ async def start_bot_async():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    # حلقة تكرار ذكية لمنع انهيار السيرفر إذا فشلت المحاولة الأولى
     while True:
         try:
             print("⏳ محاولة تهيئة اتصال آمن مع تليجرام...")
+            # عمل الجملتين دول لمسح أي اتصالات معلقة قديمة كانت مسببة الـ Freeze
             await app.initialize()
-            await app.updater.start_polling()
+            await app.bot.delete_webhook(drop_pending_updates=True) 
+            await app.updater.start_polling(drop_pending_updates=True)
             await app.start()
-            print("🟢 تم الاتصال بنجاح! البوت يعمل الآن بكفاءة وبدون عوائق.")
+            print("🟢 تم الاتصال بنجاح! البوت مستعد لاستقبال الرسائل بنسبة 100%.")
             break
         except Exception as e:
-            print(f"⚠️ فشلت المحاولة بسبب بطء الاستجابة: {e}. إعادة المحاولة بعد 5 ثوانٍ...")
+            print(f"⚠️ إعادة محاولة بسبب: {e}")
             await asyncio.sleep(5)
             
-    # الإبقاء على البوت حياً
     while True:
         await asyncio.sleep(3600)
 
 def main():
     init_db()
-    
     if not BOT_TOKEN or BOT_TOKEN == "ضع_توكن_البوت_هنا":
         print("❌ خطأ: لم يتم العثور على BOT_TOKEN")
         return
 
-    # 1. تشغيل سيرفر الويب Flask فوراً لإعطاء إشارة البناء الخضراء
     threading.Thread(target=run_flask, daemon=True).start()
-    
-    # 2. تشغيل البوت المعزول المقاوم للـ Timeout
     asyncio.run(start_bot_async())
 
 if __name__ == "__main__":
