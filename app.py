@@ -343,12 +343,8 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ طلبات سحب معلقة: {pending}"
     )
 
-def run_bot():
-    """تشغيل البوت داخل حدث مستقل لتجنب تعارض الشبكة والـ Timeout"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    # إعداد الـ Application وإيقاف التحقق الأولي الصارم لتخطي الـ Timeout
+async def start_bot_async():
+    """تهيئة وتشغيل البوت بأسلوب غير متزامن متوافق تماماً مع البيئة بدون أي تصادم loops"""
     app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -356,21 +352,28 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    print("✅ تم تخطي الفحص الأولي بنجاح. البوت يبدأ الآن...")
-    app.run_polling(initialize=False)
+    # بناء البوت وبدء الاستماع مباشرة عبر تهيئة مخصصة للبيئات المشتركة
+    await app.initialize()
+    await app.updater.start_polling()
+    await app.start()
+    
+    # الحفاظ على تشغيل البوت مفتوحاً
+    while True:
+        await asyncio.sleep(3600)
 
 def main():
     init_db()
     
     if not BOT_TOKEN or BOT_TOKEN == "ضع_توكن_البوت_هنا":
-        print("❌ خطأ: لم يتم العثور على BOT_TOKEN في الـ Secrets!")
+        print("❌ خطأ: لم يتم العثور على BOT_TOKEN")
         return
 
-    # 1. تشغيل سيرفر الويب أولاً بشكل فوري لإرسال إشارة خضراء لمنصة Hugging Face
+    # 1. تشغيل سيرفر الويب Flask في الخلفية فوراً لمنع الـ Runtime error
     threading.Thread(target=run_flask, daemon=True).start()
     
-    # 2. تشغيل البوت في خلفية الخادم بشكل منفصل ومحمي
-    run_bot()
+    # 2. تشغيل الـ Async loop الخاص بالبوت بشكل مستقل ومستقر
+    print("🚀 جاري إقلاع نظام البوت المطور بدون تضارب...")
+    asyncio.run(start_bot_async())
 
 if __name__ == "__main__":
     main()
