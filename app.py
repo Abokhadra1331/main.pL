@@ -1,178 +1,376 @@
 import os
-import logging
+import sqlite3
 import threading
-import json
+import asyncio
+from datetime import datetime
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from telegram.error import TelegramError
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters, ContextTypes
+)
 
-# إعداد السجلات لمراقبة الأخطاء
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# تشغيل سيرفر ويب خفيف لإرضاء منصة Hugging Face ومنع إغلاق الـ Space
+flask_app = Flask(__name__)
 
-app = Flask(__name__)
-
-@app.route('/')
+@flask_app.route('/')
 def home():
-    return "Bot is active and running 24/7 with Referrals!"
+    return "SHIB Bot is active and running 24/7!"
 
 def run_flask():
-    app.run(host="0.0.0.0", port=7860)
+    flask_app.run(host="0.0.0.0", port=7860)
 
-# 📢 القنوات الأربعة الخاصة بك
+# المتغيرات الأساسية الخاصة بك
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = 868999453
+PAYMENT_CHANNEL = "@Crypto_Fox13"
+
+# القنوات الأربعة كاملة بالملي
 CHANNELS = ["@penguin_110", "@Crypto_Dragon13", "@Exchange_of_referrals13", "@Crypto_Kings5"]
 
-# 📊 قاعدة بيانات بسيطة لحفظ نقاط المستخدمين والإحالات (ملف json)
-DB_FILE = "users_db.json"
+REWARD_PER_REFERRAL = 2000
+MIN_WITHDRAW = 10000
+CURRENCY = "SHIB"
 
-def load_db():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+def init_db():
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        balance REAL DEFAULT 0,
+        referrals INTEGER DEFAULT 0,
+        referred_by INTEGER DEFAULT NULL,
+        joined_at TEXT,
+        verified INTEGER DEFAULT 0
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS withdrawals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        amount REAL,
+        wallet TEXT,
+        status TEXT DEFAULT 'pending',
+        requested_at TEXT
+    )''')
+    conn.commit()
+    conn.close()
 
-def save_db(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+def get_user(user_id):
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
 
-# دالة فحص الاشتراكات الناقصة
-async def get_unsubscribed_channels(user_id, context: ContextTypes.DEFAULT_TYPE):
-    unsubscribed = []
+def add_user(user_id, username, referred_by=None):
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
+    exists = c.fetchone()
+    if not exists:
+        c.execute("INSERT INTO users (user_id, username, referred_by, joined_at, verified) VALUES (?,?,?,?,0)",
+                  (user_id, username, referred_by, datetime.now().isoformat()))
+        conn.commit()
+    conn.close()
+
+def verify_user(user_id):
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("SELECT verified, referred_by FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    if row and row[0] == 0:
+        c.execute("UPDATE users SET verified=1 WHERE user_id=?", (user_id,))
+        referred_by = row[1]
+        if referred_by and referred_by != user_id:
+            c.execute("SELECT user_id FROM users WHERE user_id=?", (referred_by,))
+            if c.fetchone():
+                c.execute("UPDATE users SET balance=balance+?, referrals=referrals+1 WHERE user_id=?",
+                          (REWARD_PER_REFERRAL, referred_by))
+        conn.commit()
+        conn.close()
+        return referred_by
+    conn.close()
+    return None
+
+def get_balance(user_id):
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("SELECT balance, referrals FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row if row else (0, 0)
+
+def add_withdrawal(user_id, amount, wallet):
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO withdrawals (user_id, amount, wallet, requested_at) VALUES (?,?,?,?)",
+              (user_id, amount, wallet, datetime.now().isoformat()))
+    c.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (amount, user_id))
+    conn.commit()
+    conn.close()
+
+def get_withdrawal(withdrawal_id):
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("SELECT * FROM withdrawals WHERE id=?", (withdrawal_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def approve_withdrawal(withdrawal_id):
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("UPDATE withdrawals SET status='approved' WHERE id=?", (withdrawal_id,))
+    conn.commit()
+    conn.close()
+
+async def check_subscriptions(user_id, context):
     for channel in CHANNELS:
         try:
-            member = await context.bot.get_chat_member(chat_id=channel, user_id=user_id)
-            if member.status not in ['member', 'creator', 'administrator']:
-                unsubscribed.append(channel)
-        except Exception as e:
-            logging.error(f"خطأ في القناة {channel}: {e}")
-            unsubscribed.append(channel)
-    return unsubscribed
+            member = await context.bot.get_chat_member(channel, user_id)
+            if member.status in ["left", "kicked"]:
+                return False
+        except:
+            return False
+    return True
 
-# دالة التشغيل عند إرسال /start (وتدعم نظام الإحالات)
+def reply_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("🔗 رابط الإحالة"), KeyboardButton("💰 رصيدي")],
+        [KeyboardButton("👥 إحالاتي"), KeyboardButton("💵 سحب")],
+        [KeyboardButton("📢 قناة إثبات الدفع")]
+    ], resize_keyboard=True)
+
+def subscription_keyboard():
+    buttons = [[InlineKeyboardButton(f"📢 اشترك في {ch}", url=f"https://t.me/{ch.lstrip('@')}")] for ch in CHANNELS]
+    buttons.append([InlineKeyboardButton("✅ تحققت من اشتراكي", callback_data="check_sub")])
+    return InlineKeyboardMarkup(buttons)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    user_id = str(user.id)
-    args = context.args  # التقاط معرف الشخص الذي قام بالإحالة
-    
-    db = load_db()
-    
-    # إذا كان المستخدم جديداً تماماً في قاعدة البيانات
-    if user_id not in db:
-        referrer_id = args[0] if (args and args[0] != user_id) else None
-        db[user_id] = {
-            "username": user.username or "No Username",
-            "points": 0,
-            "referred_by": referrer_id,
-            "referrals_count": 0,
-            "is_activated": False  # لن يتم تفعيله أو احتساب نقطة لدعوته إلا بعد الاشتراك بالقنوات
-        }
-        save_db(db)
+    args = context.args
+    referred_by = int(args[0]) if args and args[0].isdigit() else None
+    existing = get_user(user.id)
 
-    unsubscribed_channels = await get_unsubscribed_channels(user.id, context)
-    
-    if not unsubscribed_channels:
-        # إذا كان مشتركاً بالفعل، نقوم بتفعيل حسابه واحتساب النقاط إن وجد مُحيل
-        await activate_user(user_id, update, context)
-    else:
-        # بناء أزرار الاشتراك للقنوات الناقصة
-        keyboard = []
-        for index, channel in enumerate(unsubscribed_channels, start=1):
-            channel_url = f"https://t.me/{channel.replace('@', '')}"
-            keyboard.append([InlineKeyboardButton(f"📢 اشترك في القناة {index} ({channel})", url=channel_url)])
-        
-        # تمرير بيانات المحيل في الـ callback_data إذا وجد للتحقق لاحقاً
-        keyboard.append([InlineKeyboardButton("✅ اضغط هنا بعد الاشتراك لتفعيل البوت", callback_data="check_sub")])
-        
+    if not existing:
+        add_user(user.id, user.username or user.first_name, referred_by)
+
+    subscribed = await check_subscriptions(user.id, context)
+    if not subscribed:
         await update.message.reply_text(
-            f"أهلاً بك يا غالي في بوت SHIB Inu! 🚦\n\n"
-            f"للاستفادة من نظام الإحالات وتجميع النقاط، يجب عليك أولاً الاشتراك في القنوات الرسمية لدعم المشروع.\n"
-            f"يرجى الانضمام للقنوات بالأسفل ثم اضغط زر التفعيل: 👇",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            "👋 مرحباً بك!\n\n⚠️ يجب الاشتراك في القنوات التالية أولاً:",
+            reply_markup=subscription_keyboard()
         )
+        return
 
-# دالة تفعيل الحساب ومنح النقاط للمُحيل
-async def activate_user(user_id, update_or_query, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
-    db = load_db()
-    bot_username = context.bot.username
-    ref_link = f"https://t.me/{bot_username}?start={user_id}"
-    
-    # التحقق إن كان الحساب لم يُفعل بعد لمنع تكرار النقاط
-    if not db.get(user_id, {}).get("is_activated", False):
-        db[user_id]["is_activated"] = True
-        referrer_id = db[user_id].get("referred_by")
-        
-        # إذا جاء المستخدم عبر رابط إحالة شخص آخر، نمنح الشخص الآخر نقطة
-        if referrer_id and referrer_id in db:
-            db[referrer_id]["points"] += 1
-            db[referrer_id]["referrals_count"] += 1
+    user_data = get_user(user.id)
+    if user_data and user_data[6] == 0:
+        referred_by_id = verify_user(user.id)
+        if referred_by_id:
             try:
-                # إشعار الشخص الذي قام بدعوته بنجاح
                 await context.bot.send_message(
-                    chat_id=int(referrer_id),
-                    text=f"🎉 دخل مستخدم جديد عبر رابطك واشترك في القنوات! حصلت على 1 نقطة.\n"
-                         f"رصيدك الحالي: {db[referrer_id]['points']} نقطة."
+                    referred_by_id,
+                    f"🎉 انضم شخص جديد عبر رابطك!\n💰 حصلت على +{REWARD_PER_REFERRAL:,} {CURRENCY}"
                 )
-            except Exception as e:
-                logging.error(f"فشل إرسال إشعار للمُحيل: {e}")
-        
-        save_db(db)
+            except:
+                pass
 
-    welcome_text = (
-        f"🎉 ممتاز! تم تفعيل حسابك بنجاح في بوت SHIB Inu!\n\n"
-        f"📊 رصيدك الحالي: {db[user_id]['points']} نقطة.\n"
-        f"👥 عدد الإحالات الناجحة: {db[user_id]['referrals_count']}\n\n"
-        f"🔗 رابط الإحالة الخاص بك (انشره لتجميع النقاط):\n`{ref_link}`"
+    await update.message.reply_text(
+        f"👋 أهلاً {user.first_name}!\n\n"
+        f"🤖 بوت الإحالات\n"
+        f"💰 اربح {REWARD_PER_REFERRAL:,} {CURRENCY} لكل صديق تدعوه!\n"
+        f"📌 الحد الأدنى للسحب: {MIN_WITHDRAW:,} {CURRENCY}",
+        reply_markup=reply_keyboard()
     )
 
-    if is_callback:
-        await update_or_query.edit_message_text(welcome_text, parse_mode="Markdown")
-    else:
-        await update_or_query.message.reply_text(welcome_text, parse_mode="Markdown")
-
-# دالة التحقق عند الضغط على زر التفعيل
-async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = str(query.from_user.id)
-    
-    unsubscribed_channels = await get_unsubscribed_channels(query.from_user.id, context)
-    
-    if not unsubscribed_channels:
-        await activate_user(user_id, query, context, is_callback=True)
-    else:
-        keyboard = []
-        for index, channel in enumerate(unsubscribed_channels, start=1):
-            channel_url = f"https://t.me/{channel.replace('@', '')}"
-            keyboard.append([InlineKeyboardButton(f"📢 اشترك في القناة {index} ({channel})", url=channel_url)])
-        keyboard.append([InlineKeyboardButton("✅ اضغط هنا بعد الاشتراك لتفعيل البوت", callback_data="check_sub")])
-        
-        try:
+    user = query.from_user
+
+    if query.data == "check_sub":
+        subscribed = await check_subscriptions(user.id, context)
+        if subscribed:
+            referred_by_id = verify_user(user.id)
+            if referred_by_id:
+                try:
+                    await context.bot.send_message(
+                        referred_by_id,
+                        f"🎉 انضم شخص جديد عبر رابطك!\n💰 حصلت على +{REWARD_PER_REFERRAL:,} {CURRENCY}"
+                    )
+                except:
+                    pass
+            await query.edit_message_text(f"✅ تم التحقق! أهلاً {user.first_name}")
+            await context.bot.send_message(
+                user.id,
+                f"👋 أهلاً {user.first_name}!\n\n"
+                f"🤖 بوت الإحالات\n"
+                f"💰 اربح {REWARD_PER_REFERRAL:,} {CURRENCY} لكل صديق تدعوه!\n"
+                f"📌 الحد الأدنى للسحب: {MIN_WITHDRAW:,} {CURRENCY}",
+                reply_markup=reply_keyboard()
+            )
+        else:
             await query.edit_message_text(
-                "⚠️ يبدو أنك لم تشترك في جميع القنوات بعد يا صديقي!\n"
-                "تأكد من الانضمام لكل القنوات بالأسفل ثم اضغط زر التفعيل مجدداً: 👇",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                "❌ لم تشترك في جميع القنوات!\nاشترك ثم اضغط تحققت.",
+                reply_markup=subscription_keyboard()
+            )
+
+    elif query.data.startswith("approve_"):
+        if user.id != ADMIN_ID:
+            return
+        parts = query.data.split("_")
+        withdrawal_id = int(parts[1])
+        target_user_id = int(parts[2])
+        withdrawal = get_withdrawal(withdrawal_id)
+        if not withdrawal or withdrawal[4] == "approved":
+            await query.answer("تم الموافقة مسبقاً!", show_alert=True)
+            return
+        approve_withdrawal(withdrawal_id)
+        target_user = await context.bot.get_chat(target_user_id)
+        username = f"@{target_user.username}" if target_user.username else target_user.first_name
+        await context.bot.send_message(
+            PAYMENT_CHANNEL,
+            f"✅ تم الدفع!\n\n"
+            f"👤 المستخدم: {username}\n"
+            f"💰 المبلغ: {withdrawal[2]:,} {CURRENCY}\n"
+            f"🏦 Binance ID: `{withdrawal[3]}`",
+            parse_mode="Markdown"
+        )
+        try:
+            await context.bot.send_message(
+                target_user_id,
+                f"✅ تم تحويل {withdrawal[2]:,} {CURRENCY} إلى حساب Binance بتاعك!"
             )
         except:
             pass
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.answer("✅ تم الموافقة وإرسال إثبات الدفع!", show_alert=True)
 
-def main():
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        logging.error("خطأ: لم يتم العثور على BOT_TOKEN!")
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text
+
+    if context.user_data.get("awaiting_wallet"):
+        binance_id = text.strip()
+        if not binance_id.isdigit() or len(binance_id) < 9:
+            await update.message.reply_text(
+                "❌ Binance ID غير صحيح!\nلازم يكون أرقام فقط ولا يقل عن 9 أرقام.\n\nأرسل Binance ID مرة أخرى:"
+            )
+            return
+        amount = context.user_data["withdraw_amount"]
+        add_withdrawal(user.id, amount, binance_id)
+        conn = sqlite3.connect("bot.db")
+        withdrawal_id = conn.execute(
+            "SELECT id FROM withdrawals WHERE user_id=? ORDER BY id DESC LIMIT 1", (user.id,)
+        ).fetchone()[0]
+        conn.close()
+        context.user_data.pop("awaiting_wallet", None)
+        context.user_data.pop("withdraw_amount", None)
+        await update.message.reply_text(
+            "✅ تم تقديم طلب السحب وسيتم مراجعته من قبل الإدارة.",
+            reply_markup=reply_keyboard()
+        )
+        username = f"@{user.username}" if user.username else user.first_name
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"💵 طلب سحب جديد!\n\n"
+            f"👤 المستخدم: {username} ({user.id})\n"
+            f"💰 المبلغ: {amount:,} {CURRENCY}\n"
+            f"🏦 Binance ID: `{binance_id}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ موافقة وإرسال إثبات", callback_data=f"approve_{withdrawal_id}_{user.id}")
+            ]])
+        )
         return
 
-    threading.Thread(target=run_flask, daemon=True).start()
+    if text == "💰 رصيدي":
+        balance, refs = get_balance(user.id)
+        await update.message.reply_text(
+            f"💰 رصيدك الحالي: {balance:,} {CURRENCY}\n👥 عدد إحالاتك: {refs}",
+            reply_markup=reply_keyboard()
+        )
+    elif text == "🔗 رابط الإحالة":
+        bot_info = await context.bot.get_me()
+        link = f"https://t.me/{bot_info.username}?start={user.id}"
+        await update.message.reply_text(
+            f"🔗 رابط إحالتك:\n\n`{link}`\n\nاربح {REWARD_PER_REFERRAL:,} {CURRENCY} لكل شخص يشترك!",
+            parse_mode="Markdown", reply_markup=reply_keyboard()
+        )
+    elif text == "👥 إحالاتي":
+        balance, refs = get_balance(user.id)
+        await update.message.reply_text(
+            f"👥 عدد إحالاتك: {refs}\n💰 إجمالي أرباحك: {refs * REWARD_PER_REFERRAL:,} {CURRENCY}",
+            reply_markup=reply_keyboard()
+        )
+    elif text == "💵 سحب":
+        balance, _ = get_balance(user.id)
+        if balance < MIN_WITHDRAW:
+            await update.message.reply_text(
+                f"❌ رصيدك {balance:,} {CURRENCY} أقل من الحد الأدنى ({MIN_WITHDRAW:,} {CURRENCY})\n"
+                f"تحتاج {MIN_WITHDRAW - balance:,} {CURRENCY} إضافية.",
+                reply_markup=reply_keyboard()
+            )
+        else:
+            context.user_data["awaiting_wallet"] = True
+            context.user_data["withdraw_amount"] = balance
+            await update.message.reply_text(
+                f"💵 رصيدك المتاح: {balance:,} {CURRENCY}\n\n📩 أرسل Binance ID بتاعك:\n"
+                f"(لازم يكون 9 أرقام على الأقل)"
+            )
+    elif text == "📢 قناة إثبات الدفع":
+        await update.message.reply_text(
+            f"📢 قناة إثبات الدفع:\nt.me/{PAYMENT_CHANNEL.lstrip('@')}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📢 فتح القناة", url=f"https://t.me/{PAYMENT_CHANNEL.lstrip('@')}")
+            ]])
+        )
 
-    # بناء وتشفير البوت مع تخطي الفحص لتفادي الـ Timeout
-    application = Application.builder().token(token).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_click, pattern="^check_sub$"))
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    total_users = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'")
+    pending = c.fetchone()[0]
+    conn.close()
+    await update.message.reply_text(
+        f"📊 إحصائيات البوت:\n\n"
+        f"👥 إجمالي المستخدمين: {total_users}\n"
+        f"⏳ طلبات سحب معلقة: {pending}"
+    )
+
+def run_bot():
+    """تشغيل البوت داخل حدث مستقل لتجنب تعارض الشبكة والـ Timeout"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    logging.info("بدء تشغيل البوت الشامل للإحالات والاشتراكات...")
-    application.run_polling(initialize=False)
+    # إعداد الـ Application وإيقاف التحقق الأولي الصارم لتخطي الـ Timeout
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", admin_stats))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    
+    print("✅ تم تخطي الفحص الأولي بنجاح. البوت يبدأ الآن...")
+    app.run_polling(initialize=False)
 
-if __name__ == '__main__':
+def main():
+    init_db()
+    
+    if not BOT_TOKEN or BOT_TOKEN == "ضع_توكن_البوت_هنا":
+        print("❌ خطأ: لم يتم العثور على BOT_TOKEN في الـ Secrets!")
+        return
+
+    # 1. تشغيل سيرفر الويب أولاً بشكل فوري لإرسال إشارة خضراء لمنصة Hugging Face
+    threading.Thread(target=run_flask, daemon=True).start()
+    
+    # 2. تشغيل البوت في خلفية الخادم بشكل منفصل ومحمي
+    run_bot()
+
+if __name__ == "__main__":
     main()
