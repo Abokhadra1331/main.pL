@@ -278,3 +278,116 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("awaiting_wallet", None)
         context.user_data.pop("withdraw_amount", None)
         await update.message.reply_text(
+            "✅ تم تقديم طلب السحب وسيتم مراجعته من قبل الإدارة.",
+            reply_markup=reply_keyboard()
+        )
+        username = f"@{user.username}" if user.username else user.first_name
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"💵 طلب سحب جديد!\n\n"
+            f"👤 المستخدم: {username} ({user.id})\n"
+            f"💰 المبلغ: {amount:,} {CURRENCY}\n"
+            f"🏦 Binance ID: `{binance_id}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ موافقة وإرسال إثبات", callback_data=f"approve_{withdrawal_id}_{user.id}")
+            ]])
+        )
+        return
+
+    if text == "💰 رصيدي":
+        balance, refs = get_balance(user.id)
+        await update.message.reply_text(
+            f"💰 رصيدك الحالي: {balance:,} {CURRENCY}\n👥 عدد إحالاتك: {refs}",
+            reply_markup=reply_keyboard()
+        )
+    elif text == "🔗 رابط الإحالة":
+        bot_info = await context.bot.get_me()
+        link = f"https://t.me/{bot_info.username}?start={user.id}"
+        await update.message.reply_text(
+            f"🔗 رابط إحالتك:\n\n`{link}`\n\nاربح {REWARD_PER_REFERRAL:,} {CURRENCY} لكل شخص يشترك!",
+            parse_mode="Markdown", reply_markup=reply_keyboard()
+        )
+    elif text == "👥 إحالاتي":
+        balance, refs = get_balance(user.id)
+        await update.message.reply_text(
+            f"👥 عدد إحالاتك: {refs}\n💰 إجمالي أرباحك: {refs * REWARD_PER_REFERRAL:,} {CURRENCY}",
+            reply_markup=reply_keyboard()
+        )
+    elif text == "💵 سحب":
+        balance, _ = get_balance(user.id)
+        if balance < MIN_WITHDRAW:
+            await update.message.reply_text(
+                f"❌ رصيدك {balance:,} {CURRENCY} أقل من الحد الأدنى ({MIN_WITHDRAW:,} {CURRENCY})\n"
+                f"تحتاج {MIN_WITHDRAW - balance:,} {CURRENCY} إضافية.",
+                reply_markup=reply_keyboard()
+            )
+        else:
+            context.user_data["awaiting_wallet"] = True
+            context.user_data["withdraw_amount"] = balance
+            await update.message.reply_text(
+                f"💵 رصيدك المتاح: {balance:,} {CURRENCY}\n\n📩 أرسل Binance ID بتاعك:\n(لازم يكون 9 أرقام على الأقل)"
+            )
+    elif text == "📢 قناة إثبات الدفع":
+        await update.message.reply_text(
+            f"📢 قناة إثبات الدفع:\nt.me/{PAYMENT_CHANNEL.lstrip('@')}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📢 فتح القناة", url=f"https://t.me/{PAYMENT_CHANNEL.lstrip('@')}")
+            ]])
+        )
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    conn = sqlite3.connect("bot.db")
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    total_users = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'")
+    pending = c.fetchone()[0]
+    conn.close()
+    await update.message.reply_text(
+        f"📊 إحصائيات البوت:\n\n"
+        f"👥 إجمالي المستخدمين: {total_users}\n"
+        f"⏳ طلبات سحب معلقة: {pending}"
+    )
+
+async def start_polling_safe(app):
+    try:
+        await app.initialize()
+        await app.start()
+        print("⏳ جاري تهيئة البوت وتجاوز قيود الشبكة...")
+        await app.updater.start_polling(drop_pending_updates=True, timeout=60, read_timeout=60, write_timeout=60)
+        print("🟢 تم الاتصال بنجاح! البوت مستعد لاستقبال الرسائل بنسبة 100%")
+    except Exception as e:
+        print(f"⚠️ خطأ مؤقت في الاتصال، البوت يعيد المحاولة تلقائياً: {e}")
+        await asyncio.sleep(2)
+        try:
+            await app.updater.start_polling(drop_pending_updates=True, timeout=60, read_timeout=60)
+        except:
+            pass
+
+def main():
+    init_db()
+    if not BOT_TOKEN:
+        print("❌ خطأ: لم يتم العثور على BOT_TOKEN")
+        return
+
+    threading.Thread(target=run_flask, daemon=True).start()
+    
+    custom_request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0, connection_pool_size=30)
+    
+    app = Application.builder().token(BOT_TOKEN).request(custom_request).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", admin_stats))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(start_polling_safe(app))
+    loop.run_forever()
+
+if __name__ == "__main__":
+    main()
