@@ -9,6 +9,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
 )
+from telegram.request import HTTPXRequest
 
 flask_app = Flask(__name__)
 
@@ -353,18 +354,18 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def start_polling_safe(app):
-    # دالة ذكية تقوم بتجاوز تهنيج الـ Webhooks نهائياً بدون التسبب في إيقاف البرنامج
     try:
         await app.initialize()
         await app.start()
-        print("🟢 تم تجاوز قيود الشبكة بنجاح! البوت شغال حالياً.")
-        await app.updater.start_polling(drop_pending_updates=True, timeout=30, read_timeout=30)
+        print("⏳ جاري تهيئة البوت وتجاوز قيود الشبكة...")
+        # رفع مهلة الانتظار لـ 60 ثانية كاملة لضمان الرد من تليجرام دون حدوث Timeout
+        await app.updater.start_polling(drop_pending_updates=True, timeout=60, read_timeout=60, write_timeout=60)
+        print("🟢 تم الاتصال بنجاح! البوت مستعد لاستقبال الرسائل بنسبة 100%")
     except Exception as e:
         print(f"⚠️ خطأ مؤقت في الاتصال، البوت يعيد المحاولة تلقائياً: {e}")
         await asyncio.sleep(2)
-        # إجبار التشغيل حتى لو تليجرام تأخر في الرد
         try:
-            await app.updater.start_polling(drop_pending_updates=True)
+            await app.updater.start_polling(drop_pending_updates=True, timeout=60, read_timeout=60)
         except:
             pass
 
@@ -376,7 +377,10 @@ def main():
 
     threading.Thread(target=run_flask, daemon=True).start()
     
-    app = Application.builder().token(BOT_TOKEN).build()
+    # تهيئة طلب الـ HTTP بمهلة أطول وحجم حوض اتصالات أكبر لحل مشكلة الـ Timeout تماماً
+    custom_request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0, pool_size=30)
+    
+    app = Application.builder().token(BOT_TOKEN).request(custom_request).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", admin_stats))
@@ -386,8 +390,6 @@ def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(start_polling_safe(app))
-    
-    # إبقاء السيرفر حياً للأبد
     loop.run_forever()
 
 if __name__ == "__main__":
