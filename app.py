@@ -33,12 +33,11 @@ CURRENCY = "SHIB"
 def init_db():
     conn = sqlite3.connect("bot.db")
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, balance REAL DEFAULT 0, referrals INTEGER DEFAULT 0, referred_by INTEGER DEFAULT NULL, joined_at TEXT, verified INTEGER DEFAULT 0)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS withdrawals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount REAL, wallet TEXT, status TEXT DEFAULT 'pending', requested_at TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, balance REAL DEFAULT 0, referrals INTEGER DEFAULT 0, referred_by INTEGER DEFAULT NULL, joined_at TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS withdrawals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount REAL, status TEXT DEFAULT 'pending')''')
     conn.commit()
     conn.close()
 
-# --- وظائف مساعدة ---
 def check_sub(user_id, context):
     for channel in CHANNELS:
         try:
@@ -47,22 +46,16 @@ def check_sub(user_id, context):
         except: return False
     return True
 
-def add_user(user_id, username, referred_by):
-    conn = sqlite3.connect("bot.db"); c = conn.cursor()
-    c.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
-    if not c.fetchone():
-        c.execute("INSERT INTO users (user_id, username, referred_by, joined_at) VALUES (?,?,?,?)", (user_id, username, referred_by, datetime.now().isoformat()))
-        if referred_by:
-            c.execute("UPDATE users SET balance=balance+?, referrals=referrals+1 WHERE user_id=?", (REWARD_PER_REFERRAL, referred_by))
-        conn.commit()
-    conn.close()
-
-# --- الأوامر ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
     referred_by = int(args[0]) if args and args[0].isdigit() else None
-    add_user(user.id, user.username or user.first_name, referred_by)
+    
+    conn = sqlite3.connect("bot.db"); c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO users (user_id, username, referred_by) VALUES (?,?,?)", (user.id, user.username or user.first_name, referred_by))
+    if referred_by:
+        c.execute("UPDATE users SET balance=balance+?, referrals=referrals+1 WHERE user_id=?", (REWARD_PER_REFERRAL, referred_by))
+    conn.commit(); conn.close()
     
     if not check_sub(user.id, context):
         buttons = [[InlineKeyboardButton(f"اشترك في {ch}", url=f"https://t.me/{ch.lstrip('@')}")] for ch in CHANNELS]
@@ -72,7 +65,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_main_menu(update)
 
 async def send_main_menu(update):
-    kb = ReplyKeyboardMarkup([["💰 رصيدي", "🔗 رابط الإحالة"], ["💵 سحب", "📊 إحصائياتي"], ["📢 قناة إثبات الدفع"]], resize_keyboard=True)
+    kb = ReplyKeyboardMarkup([["💰 رصيدي", "🔗 رابط الإحالة"], ["💵 سحب"], ["📢 قناة إثبات الدفع"]], resize_keyboard=True)
     await update.message.reply_text("مرحباً بك في بوت الإحالات!", reply_markup=kb)
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,8 +90,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "💰 رصيدي":
         conn = sqlite3.connect("bot.db"); c = conn.cursor()
         c.execute("SELECT balance, referrals FROM users WHERE user_id=?", (user_id,))
-        bal, refs = c.fetchone()
-        await update.message.reply_text(f"💰 رصيدك: {bal} {CURRENCY}\n👥 الإحالات: {refs}")
+        res = c.fetchone(); conn.close()
+        if res: await update.message.reply_text(f"💰 رصيدك: {res[0]} {CURRENCY}\n👥 إحالاتك: {res[1]}")
     elif text == "🔗 رابط الإحالة":
         bot = await context.bot.get_me()
         await update.message.reply_text(f"🔗 رابطك: https://t.me/{bot.username}?start={user_id}")
@@ -107,7 +100,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         c.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
         bal = c.fetchone()[0]
         if bal >= MIN_WITHDRAW:
-            c.execute("INSERT INTO withdrawals (user_id, amount, requested_at) VALUES (?,?,?)", (user_id, bal, datetime.now().isoformat()))
+            c.execute("INSERT INTO withdrawals (user_id, amount) VALUES (?,?)", (user_id, bal))
             c.execute("UPDATE users SET balance=0 WHERE user_id=?", (user_id,))
             conn.commit()
             await update.message.reply_text("✅ تم إرسال طلبك للمراجعة!")
@@ -124,8 +117,10 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    
     print("🟢 البوت يعمل الآن بكامل طاقته!")
-    app.run_polling(drop_pending_updates=True)
+    # السطر المهم جداً: يمسح أي Webhook ويسمح بكل أنواع التحديثات
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
