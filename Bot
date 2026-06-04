@@ -1,19 +1,35 @@
 import os
 import sqlite3
+import threading
 from datetime import datetime
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
 )
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "ضع_توكن_البوت_هنا")
+# قراءة التوكن بأمان من إعدادات Hugging Face (Secrets)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 868999453
 PAYMENT_CHANNEL = "@Crypto_Fox13"
 CHANNELS = ["@penguin_110", "@Crypto_Dragon13", "@Exchange_of_referrals13"]
 REWARD_PER_REFERRAL = 2000
 MIN_WITHDRAW = 10000
 CURRENCY = "SHIB"
+
+# ---- كود ويب مدمج مخصص لإبقاء السيرفر حياً على Hugging Face ----
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "Bot is active and running 24/7!"
+
+def run_web_server():
+    # المنصة تمرر المنفذ تلقائياً عبر متغير بيئة يسمى PORT وافتراضياً يكون 7860
+    port = int(os.environ.get("PORT", 7860))
+    flask_app.run(host='0.0.0.0', port=port)
+# -----------------------------------------------------------------
 
 def init_db():
     conn = sqlite3.connect("bot.db")
@@ -328,12 +344,22 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     init_db()
+    
+    # 1. تشغيل سيرفر ويب Flask في خلفية منفصلة لتجنب إيقاف الاستضافة
+    threading.Thread(target=run_web_server, daemon=True).start()
+    print("✅ سيرفر الويب المساعد بدأ العمل...")
+
+    # 2. تشغيل بوت تليجرام
+    if not BOT_TOKEN:
+        print("❌ خطأ: لم يتم العثور على BOT_TOKEN في متغيرات البيئة!")
+        return
+
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    print("✅ البوت يعمل...")
+    print("✅ بوت تليجرام بدأ العمل بالكامل...")
     app.run_polling()
 
 if __name__ == "__main__":
