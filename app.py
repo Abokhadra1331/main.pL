@@ -11,7 +11,6 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-# تشغيل سيرفر ويب خفيف لإرضاء منصة Hugging Face ومنع إغلاق الـ Space
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -21,12 +20,9 @@ def home():
 def run_flask():
     flask_app.run(host="0.0.0.0", port=7860)
 
-# المتغيرات الأساسية الخاصة بك
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 868999453
 PAYMENT_CHANNEL = "@Crypto_Fox13"
-
-# القنوات الأربعة كاملة بالملي
 CHANNELS = ["@penguin_110", "@Crypto_Dragon13", "@Exchange_of_referrals13", "@Crypto_Kings5"]
 
 REWARD_PER_REFERRAL = 2000
@@ -127,17 +123,14 @@ def approve_withdrawal(withdrawal_id):
     conn.close()
 
 async def check_subscriptions(user_id, context):
-    """دالة فحص آمنة ومحمية من الـ Freeze والـ Crash"""
     for channel in CHANNELS:
         try:
-            # تنظيف المعرف والتأكد من إضافة الـ @
             ch_name = channel if channel.startswith("@") else f"@{channel}"
             member = await context.bot.get_chat_member(chat_id=ch_name, user_id=user_id)
             if member.status in ["left", "kicked"]:
                 return False
         except Exception as e:
-            print(f"⚠️ خطأ أثناء فحص القناة {channel}: {e}")
-            # لو البوت مش أدمن في القناة أو القناة فيها مشكلة هنتخطى مؤقتاً عشان البوت ما يقفش
+            print(f"⚠️ فحص قناة معطلة مؤقتاً: {e}")
             continue 
     return True
 
@@ -361,7 +354,8 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def start_bot_async():
-    custom_request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0)
+    # هنا تم إلغاء الحدود (No Timeouts) وجعل الاتصال مرن جداً ليناسب شبكة Hugging face السيئة
+    custom_request = HTTPXRequest(connect_timeout=None, read_timeout=None, write_timeout=None, pool_timeout=None)
     app = Application.builder().token(BOT_TOKEN).request(custom_request).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -371,17 +365,16 @@ async def start_bot_async():
     
     while True:
         try:
-            print("⏳ محاولة تهيئة اتصال آمن مع تليجرام...")
-            # عمل الجملتين دول لمسح أي اتصالات معلقة قديمة كانت مسببة الـ Freeze
+            print("⏳ جاري تهيئة البوت وتجاوز قيود الشبكة...")
             await app.initialize()
             await app.bot.delete_webhook(drop_pending_updates=True) 
             await app.updater.start_polling(drop_pending_updates=True)
             await app.start()
-            print("🟢 تم الاتصال بنجاح! البوت مستعد لاستقبال الرسائل بنسبة 100%.")
+            print("🟢 مبروك! البوت تخطى الـ Timeout وبدأ يستقبل الرسائل فعلياً.")
             break
         except Exception as e:
-            print(f"⚠️ إعادة محاولة بسبب: {e}")
-            await asyncio.sleep(5)
+            print(f"⚠️ تليجرام متأخر في الرد، جاري إعادة المحاولة خلال 3 ثوانٍ... الخطأ: {e}")
+            await asyncio.sleep(3)
             
     while True:
         await asyncio.sleep(3600)
