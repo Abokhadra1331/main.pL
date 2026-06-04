@@ -1,10 +1,9 @@
 import os
 import sqlite3
 import threading
-import asyncio
 from datetime import datetime
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
@@ -46,6 +45,7 @@ def check_sub(user_id, context):
         except: return False
     return True
 
+# --- الدوال ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
@@ -72,10 +72,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query.data == "check":
         if check_sub(query.from_user.id, context):
-            await query.edit_message_text("✅ تم التحقق!")
+            await query.edit_message_text("✅ تم التحقق بنجاح!")
             await send_main_menu(update)
         else:
-            await query.answer("❌ لم تشترك بعد!", show_alert=True)
+            await query.answer("❌ لم تشترك بعد في جميع القنوات!", show_alert=True)
     elif query.data.startswith("approve_"):
         if query.from_user.id == ADMIN_ID:
             w_id = query.data.split("_")[1]
@@ -94,7 +94,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if res: await update.message.reply_text(f"💰 رصيدك: {res[0]} {CURRENCY}\n👥 إحالاتك: {res[1]}")
     elif text == "🔗 رابط الإحالة":
         bot = await context.bot.get_me()
-        await update.message.reply_text(f"🔗 رابطك: https://t.me/{bot.username}?start={user_id}")
+        await update.message.reply_text(f"🔗 رابطك الخاص:\nhttps://t.me/{bot.username}?start={user_id}")
     elif text == "💵 سحب":
         conn = sqlite3.connect("bot.db"); c = conn.cursor()
         c.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
@@ -104,22 +104,24 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("UPDATE users SET balance=0 WHERE user_id=?", (user_id,))
             conn.commit()
             await update.message.reply_text("✅ تم إرسال طلبك للمراجعة!")
-            await context.bot.send_message(ADMIN_ID, f"طلب سحب جديد من {user_id}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ موافقة", callback_data=f"approve_{c.lastrowid}")]]))
+            await context.bot.send_message(ADMIN_ID, f"طلب سحب جديد من المستخدم: {user_id}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ موافقة", callback_data=f"approve_{c.lastrowid}")]]))
         else:
-            await update.message.reply_text("❌ رصيدك غير كافٍ.")
+            await update.message.reply_text(f"❌ رصيدك غير كافٍ. الحد الأدنى: {MIN_WITHDRAW} {CURRENCY}")
         conn.close()
 
 def main():
     init_db()
     threading.Thread(target=run_flask, daemon=True).start()
-    request_config = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0, write_timeout=60.0)
+    
+    # إعداد الاتصال المستقر
+    request_config = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0)
     app = Application.builder().token(BOT_TOKEN).request(request_config).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
     print("🟢 البوت يعمل الآن بكامل طاقته!")
-    # السطر المهم جداً: يمسح أي Webhook ويسمح بكل أنواع التحديثات
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
