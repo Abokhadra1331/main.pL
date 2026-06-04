@@ -9,7 +9,6 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
 )
-from telegram.request import HTTPXRequest
 
 flask_app = Flask(__name__)
 
@@ -130,7 +129,7 @@ async def check_subscriptions(user_id, context):
             if member.status in ["left", "kicked"]:
                 return False
         except Exception as e:
-            print(f"⚠️ فحص قناة معطلة مؤقتاً: {e}")
+            print(f"⚠️ فحص قناة معطلة: {e}")
             continue 
     return True
 
@@ -353,40 +352,24 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ طلبات سحب معلقة: {pending}"
     )
 
-async def start_bot_async():
-    # هنا تم إلغاء الحدود (No Timeouts) وجعل الاتصال مرن جداً ليناسب شبكة Hugging face السيئة
-    custom_request = HTTPXRequest(connect_timeout=None, read_timeout=None, write_timeout=None, pool_timeout=None)
-    app = Application.builder().token(BOT_TOKEN).request(custom_request).build()
+def main():
+    init_db()
+    if not BOT_TOKEN:
+        print("❌ خطأ: لم يتم العثور على BOT_TOKEN")
+        return
+
+    threading.Thread(target=run_flask, daemon=True).start()
+    
+    # بناء التطبيق بالطريقة الافتراضية السريعة والمستقرة
+    app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    while True:
-        try:
-            print("⏳ جاري تهيئة البوت وتجاوز قيود الشبكة...")
-            await app.initialize()
-            await app.bot.delete_webhook(drop_pending_updates=True) 
-            await app.updater.start_polling(drop_pending_updates=True)
-            await app.start()
-            print("🟢 مبروك! البوت تخطى الـ Timeout وبدأ يستقبل الرسائل فعلياً.")
-            break
-        except Exception as e:
-            print(f"⚠️ تليجرام متأخر في الرد، جاري إعادة المحاولة خلال 3 ثوانٍ... الخطأ: {e}")
-            await asyncio.sleep(3)
-            
-    while True:
-        await asyncio.sleep(3600)
-
-def main():
-    init_db()
-    if not BOT_TOKEN or BOT_TOKEN == "ضع_توكن_البوت_هنا":
-        print("❌ خطأ: لم يتم العثور على BOT_TOKEN")
-        return
-
-    threading.Thread(target=run_flask, daemon=True).start()
-    asyncio.run(start_bot_async())
+    print("🟢 جاري تنظيف الـ Webhook وبدء تشغيل البوت...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
