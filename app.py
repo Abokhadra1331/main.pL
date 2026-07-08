@@ -11,7 +11,7 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ضع_توكن_البوت_هنا")
 ADMIN_ID = 868999453
 PAYMENT_CHANNEL = "@Crypto_Fox13"
-CHANNELS = ["@penguin_110", "@Crypto_Dragon13", "@Exchange_of_referrals13", "@Crypto_Kings5"]
+CHANNELS = ["@Crypto_Fox14", "@Crypto_Dragon13", "@Exchange_of_referrals13"]
 REWARD_PER_REFERRAL = 2000
 MIN_WITHDRAW = 10000
 CURRENCY = "SHIB"
